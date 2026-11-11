@@ -1,0 +1,17 @@
+[package]
+name = "animapro"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+eframe = "0.33"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+uuid = { version = "1", features = ["v4", "serde"] }
+rfd = "0.15"
+zip = "2.4"
+tiny-skia = "0.11"
+
+[profile.release]
+opt-level = 2
+lto = true

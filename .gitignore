@@ -1,0 +1,7 @@
+/target/
+/dist/
+*.animapro
+*.mp4
+*.part.mp4
+.DS_Store
+dashboard-site/
