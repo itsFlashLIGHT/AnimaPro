@@ -5,3 +5,7 @@
 *.part.mp4
 .DS_Store
 dashboard-site/
+
+# Временные рабочие материалы Codex
+/.codex-build/
+/.codex-finalizer/

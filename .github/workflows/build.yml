@@ -1,0 +1,64 @@
+name: Build and test
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-14
+            target: aarch64-apple-darwin
+          - os: macos-14
+            target: x86_64-apple-darwin
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.90.0
+        with:
+          targets: ${{ matrix.target }}
+          components: rustfmt, clippy
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Check dependency report
+        run: python scripts/update-dependency-report.py --check
+      - name: Check formatting
+        run: cargo fmt --check
+      - name: Check Clippy
+        run: cargo clippy --locked --all-targets -- -D warnings
+      - name: Install FFmpeg on macOS if needed
+        if: runner.os == 'macOS'
+        run: |
+          if ! command -v ffmpeg >/dev/null || ! command -v ffprobe >/dev/null; then
+            brew install ffmpeg
+          fi
+      - name: Install FFmpeg on Windows if needed
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          if (-not (Get-Command ffmpeg -ErrorAction SilentlyContinue) -or -not (Get-Command ffprobe -ErrorAction SilentlyContinue)) {
+            choco install ffmpeg -y --no-progress
+            if ($LASTEXITCODE -ne 0) { throw "FFmpeg installation failed: $LASTEXITCODE" }
+            "$env:ProgramData\chocolatey\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          }
+      - name: Test host
+        env:
+          ANIMAPRO_REQUIRE_FFMPEG_TESTS: '1'
+        run: cargo test --locked
+      - name: Check macOS packaging failures
+        if: runner.os == 'macOS'
+        run: bash scripts/test-package-macos.sh
+      - name: Build target
+        run: cargo build --release --locked --target ${{ matrix.target }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: animapro-${{ matrix.target }}
+          path: |
+            target/${{ matrix.target }}/release/animapro
+            target/${{ matrix.target }}/release/animapro.exe
+          if-no-files-found: error
