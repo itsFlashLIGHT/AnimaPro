@@ -109,7 +109,7 @@ fn palette_swatch(ui: &mut egui::Ui, color: [u8; 4], name: &str, selected: bool)
         ui.painter().rect_stroke(
             response.rect,
             4.0,
-            Stroke::new(2.0, ui_style::ACCENT),
+            Stroke::new(2.0, ui.visuals().selection.stroke.color),
             egui::StrokeKind::Inside,
         );
     }
@@ -414,7 +414,7 @@ impl Default for AnimaApp {
 impl AnimaApp {
     fn with_recovery(recovery: Result<recovery::Recovery, recovery::RecoveryError>) -> Self {
         let project = Project::new();
-        let message = "Добавь рисунок на сцену".into();
+        let message = "Добавьте рисунок на сцену".into();
         let error = recovery.as_ref().err().map(|e| {
             format!(
                 "Автовосстановление недоступно: {}",
@@ -1172,8 +1172,6 @@ impl AnimaApp {
                     egui::Label::new(&asset.name).truncate(),
                 )
                 .on_hover_text(&asset.name);
-            });
-            ui.vertical(|ui| {
                 if ui.button("Создать копию").clicked() {
                     let mut copy = asset.clone();
                     copy.id = Uuid::new_v4();
@@ -1183,6 +1181,8 @@ impl AnimaApp {
                         ctx.request_repaint_of(egui::ViewportId::ROOT);
                     }
                 }
+            });
+            ui.vertical(|ui| {
                 ui.horizontal_wrapped(|ui| {
                     ui.label("Цвет:");
                     let mut color = c(self.editor_color);
@@ -1242,7 +1242,7 @@ impl AnimaApp {
                 });
 
                 if self.message.starts_with("Изменение не применено") {
-                    ui.colored_label(Color32::from_rgb(220, 70, 60), &self.message);
+                    ui.colored_label(ui.visuals().error_fg_color, &self.message);
                 }
             });
         });
@@ -1250,7 +1250,7 @@ impl AnimaApp {
             .resizable(false)
             .default_width(145.0)
             .show(ctx, |ui| {
-                ui.strong("Инструменты");
+                ui.heading("Инструменты");
                 for (tool, label) in [
                     (EditorTool::Select, "Выбрать"),
                     (EditorTool::Pencil, "Карандаш"),
@@ -1324,7 +1324,7 @@ impl AnimaApp {
                         if let Some(i) = self.editor_selected.filter(|i| *i < asset.elements.len())
                         {
                             ui.separator();
-                            ui.label("Преобразование");
+                            ui.strong("Преобразование");
                             ui.horizontal_wrapped(|ui| {
                                 if ui.button("− Размер").clicked() {
                                     self.begin_transaction();
@@ -1626,6 +1626,291 @@ fn transform_element(element: &mut DrawingElement, scale: f32, angle: f32) {
 }
 
 impl AnimaApp {
+    fn timeline_ui(&mut self, ctx: &egui::Context) {
+        const ROW_HEIGHT: f32 = 35.0;
+        let colors = timeline::Colors::new(&ctx.style().visuals);
+        let border = Stroke::new(1.0, colors.border);
+        egui::TopBottomPanel::bottom("timeline")
+            .resizable(true)
+            .default_height(185.0)
+            .min_height(150.0)
+            .frame(
+                egui::Frame::new()
+                    .fill(colors.surface)
+                    .stroke(border)
+                    .corner_radius(9)
+                    .outer_margin(egui::Margin {
+                        left: 8,
+                        right: 8,
+                        top: 4,
+                        bottom: 8,
+                    }),
+            )
+            .show(ctx, |ui| {
+                egui::Frame::new()
+                    .inner_margin(egui::Margin::symmetric(14, 8))
+                    .show(ui, |ui| self.timeline_toolbar(ui, colors));
+
+                let duration = self.project.duration;
+                let (ruler, _) =
+                    ui.allocate_exact_size(Vec2::new(ui.available_width(), 45.0), Sense::hover());
+                let label_width = (ruler.width() * 0.19).clamp(92.0, 180.0);
+                let axis = Rect::from_min_max(
+                    Pos2::new(ruler.left() + label_width, ruler.top()),
+                    ruler.right_bottom() - Vec2::new(16.0, 0.0),
+                );
+                let x_at = |time| timeline::time_to_x(time, duration, axis.left(), axis.width());
+                let time_at = |x| timeline::x_to_time(x, duration, axis.left(), axis.width());
+                let seek = ui.interact(axis, ui.id().with("ruler"), Sense::click_and_drag());
+                if (seek.clicked() || seek.dragged())
+                    && let Some(pos) = seek.interact_pointer_pos()
+                {
+                    self.time = snap_within(time_at(pos.x), duration);
+                    self.playing = false;
+                    ctx.request_repaint();
+                }
+
+                // Paint the shared grid and cursor behind the rows, using the final time
+                // after both ruler and track interactions have been processed.
+                let painter = ui.painter().clone();
+                let grid = painter.add(egui::Shape::Noop);
+                let cursor = painter.add(egui::Shape::Noop);
+                ui.spacing_mut().item_spacing.y = 0.0;
+                let tracks = egui::ScrollArea::vertical()
+                    .id_salt("timeline_tracks")
+                    .auto_shrink([false, false])
+                    .show_rows(ui, ROW_HEIGHT, self.project.objects.len(), |ui, range| {
+                        for index in range {
+                            let object = &self.project.objects[index];
+                            let id = object.id;
+                            let (row, _) = ui.allocate_exact_size(
+                                Vec2::new(ui.available_width(), ROW_HEIGHT),
+                                Sense::hover(),
+                            );
+                            let label = Rect::from_min_max(
+                                row.left_top() + Vec2::new(6.0, 2.0),
+                                Pos2::new(axis.left() - 4.0, row.bottom() - 2.0),
+                            );
+                            let track = Rect::from_x_y_ranges(axis.x_range(), row.y_range());
+                            let response =
+                                ui.interact(track, ui.id().with((id, "track")), Sense::click());
+                            if response.clicked()
+                                && let Some(pos) = response.interact_pointer_pos()
+                            {
+                                let target = time_at(pos.x);
+                                if let Some(time) = timeline::nearest(&object.poses, target)
+                                    .filter(|&time| (x_at(time) - pos.x).abs() <= 10.0)
+                                {
+                                    self.select_pose(id, time);
+                                } else {
+                                    self.selected = Some(id);
+                                    self.selected_pose = None;
+                                    self.time = snap_within(target, duration);
+                                    self.playing = false;
+                                }
+                                ctx.request_repaint();
+                            }
+
+                            let object = &self.project.objects[index];
+                            let name = &object.name;
+                            let selected = self.selected == Some(id);
+                            let label_response = ui
+                                .interact(label, ui.id().with((id, "label")), Sense::click())
+                                .on_hover_text(name);
+                            label_response.widget_info(|| {
+                                egui::WidgetInfo::selected(
+                                    egui::WidgetType::SelectableLabel,
+                                    ui.is_enabled(),
+                                    selected,
+                                    format!("Дорожка: {name}"),
+                                )
+                            });
+                            let label_painter = ui.painter_at(label);
+                            if selected || label_response.hovered() {
+                                label_painter.rect_filled(label, 5, colors.selected_row);
+                            }
+                            if label_response.has_focus() {
+                                label_painter.rect_stroke(
+                                    label,
+                                    5,
+                                    Stroke::new(1.0, colors.accent),
+                                    egui::StrokeKind::Inside,
+                                );
+                            }
+                            label_painter.circle_filled(
+                                label.left_center() + Vec2::new(12.0, 0.0),
+                                4.5,
+                                colors.accent,
+                            );
+                            let text = egui::WidgetText::from(egui::RichText::new(name).strong())
+                                .into_galley(
+                                    ui,
+                                    Some(egui::TextWrapMode::Truncate),
+                                    label.width() - 33.0,
+                                    egui::TextStyle::Body,
+                                );
+                            label_painter.galley(
+                                Pos2::new(
+                                    label.left() + 25.0,
+                                    label.center().y - text.size().y / 2.0,
+                                ),
+                                text,
+                                colors.text,
+                            );
+                            if label_response.clicked() {
+                                self.selected = Some(id);
+                                self.selected_pose = None;
+                                ctx.request_repaint();
+                            }
+
+                            let painter = ui.painter_at(track);
+                            let y = track.center().y;
+                            painter.line_segment(
+                                [Pos2::new(x_at(0.0), y), Pos2::new(x_at(duration), y)],
+                                Stroke::new(1.0, colors.track),
+                            );
+                            for time in timeline::markers(&object.poses, duration, axis.width()) {
+                                painter.add(timeline::diamond(
+                                    Pos2::new(x_at(time), y),
+                                    6.0,
+                                    colors.marker,
+                                    Stroke::NONE,
+                                ));
+                            }
+                            if let Some((selected_id, time)) = self.selected_pose
+                                && selected_id == id
+                            {
+                                painter.add(timeline::diamond(
+                                    Pos2::new(x_at(time), y),
+                                    7.0,
+                                    colors.accent,
+                                    Stroke::new(1.5, colors.marker_outline),
+                                ));
+                            }
+                        }
+                    });
+
+                let (ruler_shape, cursor_shape) = timeline::ruler_shapes(
+                    &painter,
+                    ruler,
+                    tracks.inner_rect.bottom(),
+                    duration,
+                    self.time,
+                    x_at,
+                    colors,
+                );
+                painter.set(grid, ruler_shape);
+                painter.set(cursor, cursor_shape);
+            });
+    }
+
+    fn timeline_toolbar(&mut self, ui: &mut egui::Ui, colors: timeline::Colors) {
+        ui.horizontal(|ui| {
+            ui.heading("Таймлайн");
+            ui.separator();
+            if timeline::transport_button(ui, timeline::Transport::Start, colors).clicked() {
+                self.time = 0.0;
+                self.playing = false;
+            }
+            let playback = if self.playing {
+                timeline::Transport::Pause
+            } else {
+                timeline::Transport::Play
+            };
+            if timeline::transport_button(ui, playback, colors).clicked() {
+                self.playing = !self.playing;
+            }
+            ui.separator();
+            egui::Frame::new()
+                .stroke(Stroke::new(1.0, colors.border))
+                .corner_radius(6)
+                .inner_margin(egui::Margin::symmetric(10, 5))
+                .show(ui, |ui| {
+                    ui.label(
+                        egui::RichText::new(format!(
+                            "{:.1} / {:.1} с",
+                            self.time, self.project.duration
+                        ))
+                        .monospace()
+                        .color(colors.text),
+                    );
+                });
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let button = ui.add_sized(
+                    [76.0, 29.0],
+                    egui::Button::new("")
+                        .fill(colors.surface)
+                        .stroke(Stroke::new(1.0, colors.border)),
+                );
+                button.widget_info(|| {
+                    egui::WidgetInfo::labeled(
+                        egui::WidgetType::Button,
+                        ui.is_enabled(),
+                        "Длительность фильма",
+                    )
+                });
+                ui.painter().text(
+                    button.rect.left_center() + Vec2::new(9.0, 0.0),
+                    egui::Align2::LEFT_CENTER,
+                    timeline::duration_label(self.project.duration),
+                    egui::FontId::proportional(13.0),
+                    colors.text,
+                );
+                let tip = button.rect.right_center() - Vec2::new(11.0, 0.0);
+                ui.painter().add(egui::Shape::convex_polygon(
+                    vec![
+                        tip + Vec2::new(-4.0, -2.0),
+                        tip + Vec2::new(4.0, -2.0),
+                        tip + Vec2::new(0.0, 3.0),
+                    ],
+                    colors.text,
+                    Stroke::NONE,
+                ));
+                egui::Popup::menu(&button)
+                    .align(egui::RectAlign::TOP_END)
+                    .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+                    .show(|ui| self.timeline_duration(ui));
+                if ui.available_width() >= 106.0 {
+                    ui.label(egui::RichText::new("Длительность:").color(colors.text));
+                }
+            });
+        });
+    }
+
+    fn timeline_duration(&mut self, ui: &mut egui::Ui) {
+        ui.label("Длительность фильма");
+        let mut duration = self.project.duration;
+        let response = ui.add(egui::Slider::new(&mut duration, 1.0..=60.0).suffix(" с"));
+        response
+            .widget_info(|| egui::WidgetInfo::slider(true, duration as f64, "Длительность фильма"));
+        if response.drag_started() {
+            self.begin_transaction();
+        }
+        if response.changed() {
+            let last = self
+                .project
+                .objects
+                .iter()
+                .filter_map(|object| object.poses.last())
+                .map(|pose| pose.time)
+                .fold(0.0_f32, f32::max);
+            if duration >= last {
+                if self.try_edit(|project| project.duration = duration) {
+                    self.time = self.time.min(duration);
+                    self.message = "Длительность изменена".into();
+                }
+            } else {
+                self.message = "Нельзя сократить: за границей есть позы".into();
+            }
+        }
+        if response.drag_stopped() {
+            self.finish_transaction();
+        }
+        if self.message.starts_with("Нельзя сократить") {
+            ui.colored_label(ui.visuals().error_fg_color, &self.message);
+        }
+    }
+
     fn update_ui(&mut self, ctx: &egui::Context) {
         ui_style::install_theme(ctx, self.theme);
         if self.recovery_prompt_pending {
@@ -1778,11 +2063,14 @@ impl AnimaApp {
                 }
                 ui.separator();
                 ui.add_sized(
-                    [100.0, ui.spacing().interact_size.y],
+                    [
+                        (ui.max_rect().width() * 0.16).clamp(100.0, 220.0),
+                        ui.spacing().interact_size.y,
+                    ],
                     egui::Label::new(&self.project.name).truncate(),
                 )
                 .on_hover_text(&self.project.name);
-                ui.label(if self.dirty {
+                ui.weak(if self.dirty {
                     "Есть изменения"
                 } else {
                     "Сохранено"
@@ -1844,12 +2132,12 @@ impl AnimaApp {
                 }
             });
         });
+        self.timeline_ui(ctx);
         egui::SidePanel::left("assets")
             .resizable(false)
             .default_width(180.0)
             .show(ctx, |ui| {
                 ui.heading("Рисунки");
-                ui.label("Выберите рисунок для сцены");
                 ui.separator();
                 let asset_ids: std::collections::HashSet<_> =
                     self.project.assets.iter().map(|asset| asset.id).collect();
@@ -1942,7 +2230,7 @@ impl AnimaApp {
             });
         egui::SidePanel::right("properties")
             .resizable(false)
-            .default_width(220.0)
+            .exact_width(220.0)
             .show(ctx, |ui| {
                 if let Some(job) = &self.export {
                     ui.group(|ui| {
@@ -2011,30 +2299,17 @@ impl AnimaApp {
                 egui::ScrollArea::vertical()
                     .id_salt("properties_scroll")
                     .show(ui, |ui| {
-                        let step = if self.project.objects.is_empty() {
-                            "Добавь рисунок на сцену"
-                        } else if self
-                            .project
-                            .objects
-                            .iter()
-                            .all(|object| object.poses.len() < 2)
-                        {
-                            "Передвинь время и объект"
-                        } else {
-                            "Нажми «Смотреть»"
-                        };
-                        ui.label(step);
+                        ui.heading("Свойства");
                         if let Some(error) = &self.error {
                             let mut dismiss = false;
                             ui.horizontal_wrapped(|ui| {
-                                ui.colored_label(Color32::from_rgb(220, 70, 60), error);
+                                ui.colored_label(ui.visuals().error_fg_color, error);
                                 dismiss = ui.button("Закрыть сообщение").clicked();
                             });
                             if dismiss {
                                 self.error = None;
                             }
                         }
-                        ui.heading("Свойства");
                         if let Some(id) = self.selected {
                             ui.strong("Объект и порядок слоёв");
                             if let Some(object) = self.selected_object() {
@@ -2115,7 +2390,7 @@ impl AnimaApp {
                                 self.finish_transaction();
                             }
                             ui.separator();
-                            ui.heading("Позы");
+                            ui.strong("Позы");
                             ui.label("Нажмите отметку на дорожке или выберите позу ниже.");
                             let pose_count =
                                 self.selected_object().map(|o| o.poses.len()).unwrap_or(0);
@@ -2211,262 +2486,10 @@ impl AnimaApp {
                                 self.selected = None;
                                 self.selected_pose = None;
                             }
+                        } else if self.project.objects.is_empty() {
+                            ui.weak("Здесь появятся свойства выбранного объекта.");
                         } else {
-                            ui.label("Выбери объект на сцене");
-                        }
-                    });
-            });
-        egui::TopBottomPanel::bottom("timeline")
-            .resizable(true)
-            .default_height(190.0)
-            .min_height(150.0)
-            .show(ctx, |ui| {
-                ui.horizontal_wrapped(|ui| {
-                    if ui_style::primary(
-                        ui,
-                        if self.playing {
-                            "Пауза"
-                        } else {
-                            "Смотреть"
-                        },
-                        true,
-                    )
-                    .clicked()
-                    {
-                        self.playing = !self.playing;
-                    }
-                    if ui.button("В начало").clicked() {
-                        self.time = 0.0;
-                        self.playing = false;
-                    }
-                    ui.label(format!(
-                        "{:.1} / {:.1} сек.",
-                        self.time, self.project.duration
-                    ));
-                });
-                let mut duration = self.project.duration;
-                let response = ui
-                    .horizontal_wrapped(|ui| {
-                        ui.label("Длительность:");
-                        ui.spacing_mut().slider_width =
-                            (ui.clip_rect().width() - 165.0).clamp(20.0, 100.0);
-                        ui.add(egui::Slider::new(&mut duration, 1.0..=60.0).suffix(" сек."))
-                    })
-                    .inner;
-                response.widget_info(|| {
-                    egui::WidgetInfo::slider(true, duration as f64, "Длительность фильма")
-                });
-                if response.drag_started() {
-                    self.begin_transaction();
-                }
-                if response.changed() {
-                    let last = self
-                        .project
-                        .objects
-                        .iter()
-                        .flat_map(|o| o.poses.iter())
-                        .map(|p| p.time)
-                        .fold(0.0_f32, f32::max);
-                    if duration >= last {
-                        if self.try_edit(|project| project.duration = duration) {
-                            self.time = self.time.min(duration);
-                            self.message = "Длительность изменена".into();
-                        }
-                    } else {
-                        self.message = "Нельзя сократить: за границей есть позы".into();
-                    }
-                }
-                if response.drag_stopped() {
-                    self.finish_transaction();
-                }
-                ui.separator();
-                let label_width = 140.0;
-                let width = (ui.clip_rect().right()
-                    - ui.cursor().left()
-                    - label_width
-                    - ui.spacing().item_spacing.x)
-                    .max(10.0);
-                ui.horizontal(|ui| {
-                    ui.allocate_space(Vec2::new(label_width, 1.0));
-                    let (r, response) =
-                        ui.allocate_exact_size(Vec2::new(width, 28.0), Sense::click_and_drag());
-                    let p = ui.painter_at(r);
-                    p.line_segment(
-                        [r.left_center(), r.right_center()],
-                        Stroke::new(2.0, Color32::GRAY),
-                    );
-                    let step =
-                        ((self.project.duration / (width / 45.0).max(1.0)).ceil() as usize).max(1);
-                    for sec in (0..=self.project.duration.floor() as usize).step_by(step) {
-                        let x =
-                            timeline::time_to_x(sec as f32, self.project.duration, r.left(), width);
-                        p.line_segment(
-                            [Pos2::new(x, r.top()), Pos2::new(x, r.bottom())],
-                            Stroke::new(1.0, Color32::LIGHT_GRAY),
-                        );
-                        p.text(
-                            Pos2::new(x, r.top()),
-                            if x > r.right() - 35.0 {
-                                egui::Align2::RIGHT_TOP
-                            } else {
-                                egui::Align2::LEFT_TOP
-                            },
-                            format!("{sec}"),
-                            egui::FontId::proportional(12.0),
-                            ui.visuals().text_color(),
-                        );
-                    }
-                    let x = timeline::time_to_x(self.time, self.project.duration, r.left(), width);
-                    p.line_segment(
-                        [Pos2::new(x, r.top()), Pos2::new(x, r.bottom())],
-                        Stroke::new(2.0, ui_style::ACCENT),
-                    );
-                    if (response.clicked() || response.dragged())
-                        && let Some(pos) = response.interact_pointer_pos()
-                    {
-                        self.time = snap_within(
-                            timeline::x_to_time(pos.x, self.project.duration, r.left(), width),
-                            self.project.duration,
-                        );
-                        self.playing = false;
-                    }
-                });
-                ui.separator();
-                let row_count = self.project.objects.len();
-                egui::ScrollArea::vertical()
-                    .id_salt("timeline_tracks")
-                    .show_rows(ui, 24.0, row_count, |ui, range| {
-                        for index in range {
-                            let Some(object) = self.project.objects.get(index) else {
-                                continue;
-                            };
-                            let id = object.id;
-                            let name = object.name.clone();
-                            let marks =
-                                timeline::markers(&object.poses, self.project.duration, width);
-                            ui.push_id(id, |ui| {
-                                ui.horizontal(|ui| {
-                                    let (label_rect, label_response) = ui.allocate_exact_size(
-                                        Vec2::new(label_width, 24.0),
-                                        Sense::click(),
-                                    );
-                                    label_response.widget_info(|| {
-                                        egui::WidgetInfo::selected(
-                                            egui::WidgetType::SelectableLabel,
-                                            ui.is_enabled(),
-                                            self.selected == Some(id),
-                                            format!("Дорожка: {name}"),
-                                        )
-                                    });
-                                    let text = egui::WidgetText::from(name.clone()).into_galley(
-                                        ui,
-                                        Some(egui::TextWrapMode::Truncate),
-                                        label_width - 8.0,
-                                        egui::TextStyle::Body,
-                                    );
-                                    if self.selected == Some(id) {
-                                        ui.painter().rect_filled(
-                                            label_rect,
-                                            2.0,
-                                            ui.visuals().selection.bg_fill,
-                                        );
-                                    }
-                                    ui.painter().galley(
-                                        label_rect.left_center()
-                                            - Vec2::new(-3.0, text.size().y / 2.0),
-                                        text,
-                                        ui.visuals().text_color(),
-                                    );
-                                    let label_response = label_response.on_hover_text(&name);
-                                    if self.selected == Some(id) || label_response.has_focus() {
-                                        ui.painter().rect_stroke(
-                                            label_rect,
-                                            2.0,
-                                            Stroke::new(1.5, ui_style::ACCENT),
-                                            egui::StrokeKind::Inside,
-                                        );
-                                    }
-                                    if label_response.clicked() {
-                                        self.selected = Some(id);
-                                        self.selected_pose = None;
-                                    }
-                                    let (rect, response) = ui.allocate_exact_size(
-                                        Vec2::new(width, 24.0),
-                                        Sense::click(),
-                                    );
-                                    let painter = ui.painter_at(rect);
-                                    painter.line_segment(
-                                        [rect.left_center(), rect.right_center()],
-                                        Stroke::new(1.0, Color32::LIGHT_GRAY),
-                                    );
-                                    for time in marks {
-                                        let x = timeline::time_to_x(
-                                            time,
-                                            self.project.duration,
-                                            rect.left(),
-                                            width,
-                                        );
-                                        painter.circle_filled(
-                                            Pos2::new(x, rect.center().y),
-                                            6.0,
-                                            ui_style::MUTED,
-                                        );
-                                    }
-                                    if let Some((selected_id, time)) = self.selected_pose
-                                        && selected_id == id
-                                    {
-                                        let x = timeline::time_to_x(
-                                            time,
-                                            self.project.duration,
-                                            rect.left(),
-                                            width,
-                                        );
-                                        painter.circle_filled(
-                                            Pos2::new(x, rect.center().y),
-                                            7.0,
-                                            ui_style::ACCENT,
-                                        );
-                                        painter.circle_stroke(
-                                            Pos2::new(x, rect.center().y),
-                                            7.0,
-                                            Stroke::new(2.0, Color32::WHITE),
-                                        );
-                                    }
-                                    if response.clicked()
-                                        && let Some(pos) = response.interact_pointer_pos()
-                                    {
-                                        let target = timeline::x_to_time(
-                                            pos.x,
-                                            self.project.duration,
-                                            rect.left(),
-                                            width,
-                                        );
-                                        let nearest = self
-                                            .project
-                                            .objects
-                                            .iter()
-                                            .find(|o| o.id == id)
-                                            .and_then(|o| timeline::nearest(&o.poses, target));
-                                        if let Some(time) = nearest.filter(|time| {
-                                            (timeline::time_to_x(
-                                                *time,
-                                                self.project.duration,
-                                                rect.left(),
-                                                width,
-                                            ) - pos.x)
-                                                .abs()
-                                                <= 10.0
-                                        }) {
-                                            self.select_pose(id, time);
-                                        } else {
-                                            self.selected = Some(id);
-                                            self.selected_pose = None;
-                                            self.time = snap_within(target, self.project.duration);
-                                            self.playing = false;
-                                        }
-                                    }
-                                });
-                            });
+                            ui.weak("Выберите объект на сцене, чтобы изменить его свойства.");
                         }
                     });
             });
@@ -2474,11 +2497,11 @@ impl AnimaApp {
             .frame(egui::Frame::central_panel(&ctx.style()).fill(ui_style::workspace(self.theme)))
             .show(ctx, |ui| {
                 ui.heading("Сцена");
-                if self.project.objects.is_empty() {
-                    ui.label("Добавь рисунок из панели слева");
+                ui.weak(if self.project.objects.is_empty() {
+                    "Нажмите «На сцену» под рисунком в левой панели."
                 } else {
-                    ui.label("Перетаскивайте объект — в это время автоматически создаётся поза");
-                }
+                    "Переместите объект, чтобы задать позу в выбранный момент."
+                });
                 let available = ui.available_size();
                 let factor = (available.x / scene::WIDTH)
                     .min(available.y / scene::HEIGHT)
@@ -2538,15 +2561,6 @@ impl AnimaApp {
                     Stroke::new(1.0, Color32::LIGHT_GRAY),
                     egui::StrokeKind::Inside,
                 );
-                if self.project.objects.is_empty() {
-                    painter.text(
-                        rect.center(),
-                        egui::Align2::CENTER_CENTER,
-                        "Добавь рисунок из панели слева",
-                        egui::FontId::proportional(18.0),
-                        ui_style::MUTED,
-                    );
-                }
                 let to_scene = |pos: Pos2| (pos - rect.center()) / factor;
                 let hit = |pos: Pos2| {
                     let p = to_scene(pos);
@@ -2668,7 +2682,7 @@ impl AnimaApp {
         }
         if self.show_lesson {
             egui::Window::new("Первый мультфильм").open(&mut self.show_lesson).resizable(true).show(ctx, |ui| {
-                ui.label("1. В разделе «Рисунки» нажмите «Добавить» у мяча или создайте свой рисунок.");
+                ui.label("1. В разделе «Рисунки» нажмите «На сцену» под мячом или создайте свой рисунок.");
                 ui.label("2. Переместите объект на сцене — это первая поза.");
                 ui.label("3. Нажмите на шкалу времени, например на 2 секунды, и снова переместите объект. Появится вторая поза.");
                 ui.label("4. Нажмите «В начало», затем «Смотреть».");
@@ -2700,6 +2714,10 @@ impl AnimaApp {
 }
 
 impl eframe::App for AnimaApp {
+    fn clear_color(&self, _: &egui::Visuals) -> [f32; 4] {
+        ui_style::workspace(self.theme).to_normalized_gamma_f32()
+    }
+
     fn update(&mut self, ctx: &egui::Context, _: &mut eframe::Frame) {
         self.update_ui(ctx);
     }
@@ -2853,15 +2871,10 @@ mod tests {
                     let visible = output
                         .shapes
                         .iter()
-                        .filter(|shape| match &shape.shape {
-                            egui::Shape::Circle(circle)
-                                if circle.fill == ui_style::MUTED && circle.radius == 6.0 =>
-                            {
-                                let marker =
-                                    Rect::from_center_size(circle.center, Vec2::splat(12.0));
+                        .filter(|shape| {
+                            timeline::marker_bounds(&shape.shape).is_some_and(|marker| {
                                 shape.clip_rect.contains_rect(marker) && marker.bottom() <= h / zoom
-                            }
-                            _ => false,
+                            })
                         })
                         .count();
                     assert_eq!(
@@ -2901,18 +2914,6 @@ mod tests {
                     };
                     let _ = ctx.run(input(), |ctx| app.update_ui(ctx));
                     let output = ctx.run(input(), |ctx| app.update_ui(ctx));
-                    let right = output
-                        .shapes
-                        .iter()
-                        .find_map(|shape| match &shape.shape {
-                            egui::Shape::Circle(circle)
-                                if circle.fill == ui_style::MUTED && circle.radius == 6.0 =>
-                            {
-                                Some(shape.clip_rect.right())
-                            }
-                            _ => None,
-                        })
-                        .expect("timeline marker");
                     let bounds = output
                         .platform_output
                         .accesskit_update
@@ -2927,10 +2928,10 @@ mod tests {
                         .expect("duration control");
                     assert!(
                         bounds.x0 >= 0.0
-                            && bounds.x1 <= right as f64 + 1.0
+                            && bounds.x1 <= (w / zoom) as f64 + 1.0
                             && bounds.y0 >= 0.0
                             && bounds.y1 <= (h / zoom) as f64 + 1.0,
-                        "duration control clipped: {bounds:?} at {w}x{h}, zoom {zoom}, density {density}; right {right}"
+                        "duration control clipped: {bounds:?} at {w}x{h}, zoom {zoom}, density {density}"
                     );
                 }
             }
@@ -3843,6 +3844,34 @@ mod editor_tests {
         ui_style::install(&ctx);
         let _ = ctx.run(input(vec![]), |ctx| app.update_ui(ctx));
         let output = ctx.run(input(vec![]), |ctx| app.update_ui(ctx));
+        let button = output
+            .platform_output
+            .accesskit_update
+            .unwrap()
+            .nodes
+            .iter()
+            .find_map(|(_, node)| {
+                (node.role() == egui::accesskit::Role::Button
+                    && node.label() == Some("Длительность фильма"))
+                .then(|| node.bounds())
+                .flatten()
+            })
+            .expect("duration menu button");
+        let center = Pos2::new(
+            (button.x0 + button.x1) as f32 / 2.0,
+            (button.y0 + button.y1) as f32 / 2.0,
+        );
+        let _ = ctx.run(
+            input(vec![
+                egui::Event::PointerMoved(center),
+                pointer(center, true),
+            ]),
+            |ctx| app.update_ui(ctx),
+        );
+        let _ = ctx.run(input(vec![pointer(center, false)]), |ctx| {
+            app.update_ui(ctx)
+        });
+        let output = ctx.run(input(vec![]), |ctx| app.update_ui(ctx));
         let slider = output
             .platform_output
             .accesskit_update
@@ -3906,6 +3935,54 @@ mod editor_tests {
         assert!(app.project == expected);
     }
     #[test]
+    fn scrubbing_the_ruler_aligns_the_playhead_with_pose_markers() {
+        let mut app = AnimaApp::with_recovery(Err("test".into()));
+        let asset = app.project.assets[0].id;
+        for _ in 0..2 {
+            app.add_object(asset);
+            app.project.objects.last_mut().unwrap().poses.push(Pose {
+                time: 3.0,
+                transform: Transform::default(),
+                linear: false,
+            });
+        }
+        let ctx = egui::Context::default();
+        let _ = ctx.run(input(vec![]), |ctx| app.update_ui(ctx));
+        let output = ctx.run(input(vec![]), |ctx| app.update_ui(ctx));
+        let mut markers: Vec<_> = output
+            .shapes
+            .iter()
+            .filter_map(|shape| timeline::marker_bounds(&shape.shape))
+            .collect();
+        assert_eq!(markers.len(), 4);
+        let first_x = markers[0].center().x;
+        markers.retain(|marker| marker.center().x > first_x);
+        assert_eq!(markers.len(), 2);
+        let x = markers[0].center().x;
+        let mut frame = |events| ctx.run(input(events), |ctx| app.update_ui(ctx));
+        let start = Pos2::new(x - 45.0, markers[0].center().y - 33.0);
+        let end = Pos2::new(x, start.y);
+        frame(vec![egui::Event::PointerMoved(start), pointer(start, true)]);
+        frame(vec![egui::Event::PointerMoved(end)]);
+        let output = frame(vec![pointer(end, false)]);
+        assert_eq!(app.time, 3.0);
+        let accent = timeline::Colors::new(&ui_style::theme_visuals(app.theme)).accent;
+        assert!(output.shapes.iter().any(|clipped| {
+            let egui::Shape::Vec(shapes) = &clipped.shape else {
+                return false;
+            };
+            shapes.iter().any(|shape| match shape {
+                egui::Shape::LineSegment { points, stroke } if stroke.color == accent => {
+                    points[0].y < markers[0].center().y
+                        && points[1].y > markers[1].center().y
+                        && (points[0].x - x).abs() < 0.01
+                        && points[0].x == points[1].x
+                }
+                _ => false,
+            })
+        }));
+    }
+    #[test]
     fn clicking_both_end_markers_selects_original_pose_times() {
         let mut app = AnimaApp::with_recovery(Err("test".into()));
         app.add_object(app.project.assets[0].id);
@@ -3924,14 +4001,7 @@ mod editor_tests {
         let mut markers: Vec<_> = output
             .shapes
             .iter()
-            .filter_map(|shape| match &shape.shape {
-                egui::Shape::Circle(circle)
-                    if circle.fill == ui_style::MUTED && circle.radius == 6.0 =>
-                {
-                    Some(circle.center)
-                }
-                _ => None,
-            })
+            .filter_map(|shape| timeline::marker_bounds(&shape.shape).map(|bounds| bounds.center()))
             .collect();
         markers.sort_by(|a, b| a.x.total_cmp(&b.x));
         assert!(markers.len() > 2);
@@ -4140,6 +4210,65 @@ mod editor_tests {
                 .iter()
                 .all(|object| object.asset_id == asset_id)
         );
+    }
+    #[test]
+    fn selecting_and_deselecting_an_object_preserves_scene_bounds() {
+        for (width, height) in [(1024.0, 640.0), (1280.0, 760.0)] {
+            for zoom in [1.0, 1.5] {
+                let mut app = AnimaApp::with_recovery(Err("test".into()));
+                app.add_object(app.project.assets[0].id);
+                let object = app.selected.take().unwrap();
+                app.project.objects[0].name = "Очень длинное название объекта ".repeat(20);
+                let ctx = egui::Context::default();
+                ui_style::install(&ctx);
+                ctx.set_zoom_factor(zoom);
+                let mut frame = |events| {
+                    let output = ctx.run(
+                        egui::RawInput {
+                            screen_rect: Some(Rect::from_min_size(
+                                Pos2::ZERO,
+                                Vec2::new(width / zoom, height / zoom),
+                            )),
+                            events,
+                            ..Default::default()
+                        },
+                        |ctx| app.update_ui(ctx),
+                    );
+                    let texture = app.scene_texture.as_ref().unwrap().id();
+                    let bounds = output
+                        .shapes
+                        .iter()
+                        .find_map(|shape| match &shape.shape {
+                            egui::Shape::Mesh(mesh) if mesh.texture_id == texture => {
+                                Some(mesh.calc_bounds())
+                            }
+                            _ => None,
+                        })
+                        .expect("scene image");
+                    (bounds, app.selected)
+                };
+
+                frame(vec![]);
+                let (initial, _) = frame(vec![]);
+                for (position, selected) in [
+                    (initial.center(), Some(object)),
+                    (initial.left_top() + Vec2::splat(10.0), None),
+                ] {
+                    frame(vec![
+                        egui::Event::PointerMoved(position),
+                        pointer(position, true),
+                    ]);
+                    assert_eq!(frame(vec![pointer(position, false)]).1, selected);
+                    for _ in 0..3 {
+                        assert_eq!(
+                            frame(vec![]),
+                            (initial, selected),
+                            "{width}x{height} at zoom {zoom}"
+                        );
+                    }
+                }
+            }
+        }
     }
     #[test]
     fn scene_fast_drag_uses_press_position_and_undoes_in_one_step() {

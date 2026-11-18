@@ -2,10 +2,12 @@
 use eframe::egui::{self, Color32, CornerRadius, Stroke};
 
 pub const ACCENT: Color32 = Color32::from_rgb(112, 68, 220);
+pub const PRIMARY_HOVER: Color32 = Color32::from_rgb(88, 51, 184);
+pub const PRIMARY_PRESSED: Color32 = Color32::from_rgb(71, 40, 153);
 pub const SURFACE: Color32 = Color32::WHITE;
 pub const WORKSPACE: Color32 = Color32::from_rgb(235, 237, 243);
 pub const BORDER: Color32 = Color32::from_rgb(216, 220, 231);
-pub const MUTED: Color32 = Color32::from_rgb(102, 115, 138);
+pub const MUTED: Color32 = Color32::from_rgb(85, 98, 121);
 pub const TEXT: Color32 = Color32::from_rgb(41, 49, 68);
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -28,6 +30,16 @@ pub fn install(ctx: &egui::Context) {
 
 pub fn install_theme(ctx: &egui::Context, theme: Theme) {
     let mut style = (*ctx.style()).clone();
+    style.visuals = theme_visuals(theme);
+    style
+        .text_styles
+        .insert(egui::TextStyle::Heading, egui::FontId::proportional(18.0));
+    style.spacing.button_padding = egui::vec2(8.0, 5.0);
+    style.spacing.item_spacing = egui::vec2(8.0, 6.0);
+    ctx.set_style(style);
+}
+
+pub(crate) fn theme_visuals(theme: Theme) -> egui::Visuals {
     let dark = theme == Theme::Dark;
     let mut visuals = if dark {
         egui::Visuals::dark()
@@ -69,7 +81,11 @@ pub fn install_theme(ctx: &egui::Context, theme: Theme) {
     visuals.extreme_bg_color = inset;
     visuals.faint_bg_color = inset;
     visuals.weak_text_color = Some(muted);
-    visuals.hyperlink_color = ACCENT;
+    visuals.error_fg_color = if dark {
+        Color32::from_rgb(255, 155, 148)
+    } else {
+        Color32::from_rgb(166, 49, 42)
+    };
     visuals.selection.bg_fill = selected;
     visuals.selection.stroke = Stroke::new(
         1.5,
@@ -79,6 +95,7 @@ pub fn install_theme(ctx: &egui::Context, theme: Theme) {
             ACCENT
         },
     );
+    visuals.hyperlink_color = visuals.selection.stroke.color;
     visuals.window_corner_radius = CornerRadius::same(8);
     visuals.menu_corner_radius = CornerRadius::same(7);
     for widget in [
@@ -98,14 +115,11 @@ pub fn install_theme(ctx: &egui::Context, theme: Theme) {
     } else {
         Color32::from_rgb(241, 242, 250)
     };
-    visuals.widgets.hovered.bg_stroke = Stroke::new(1.0, ACCENT);
+    visuals.widgets.hovered.bg_stroke = Stroke::new(1.0, visuals.selection.stroke.color);
     visuals.widgets.active.weak_bg_fill = selected;
-    visuals.widgets.active.bg_stroke = Stroke::new(2.0, ACCENT);
+    visuals.widgets.active.bg_stroke = Stroke::new(2.0, visuals.selection.stroke.color);
     visuals.widgets.open.weak_bg_fill = selected;
-    style.spacing.button_padding = egui::vec2(8.0, 5.0);
-    style.spacing.item_spacing = egui::vec2(8.0, 6.0);
-    style.visuals = visuals;
-    ctx.set_style(style);
+    visuals
 }
 
 /// A primary action with distinct hover, focus, and disabled states.
@@ -114,9 +128,9 @@ pub fn primary(ui: &mut egui::Ui, label: &str, enabled: bool) -> egui::Response 
         let visuals = &mut ui.style_mut().visuals.widgets;
         visuals.inactive.weak_bg_fill = ACCENT;
         visuals.inactive.bg_stroke = Stroke::new(1.0, ACCENT);
-        visuals.hovered.weak_bg_fill = Color32::from_rgb(88, 51, 184);
-        visuals.hovered.bg_stroke = Stroke::new(1.0, Color32::from_rgb(88, 51, 184));
-        visuals.active.weak_bg_fill = Color32::from_rgb(88, 51, 184);
+        visuals.hovered.weak_bg_fill = PRIMARY_HOVER;
+        visuals.hovered.bg_stroke = Stroke::new(1.0, PRIMARY_HOVER);
+        visuals.active.weak_bg_fill = PRIMARY_PRESSED;
         visuals.active.bg_stroke = Stroke::new(2.0, TEXT);
         ui.add_enabled(
             enabled,
